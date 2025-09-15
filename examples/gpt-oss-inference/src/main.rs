@@ -1,12 +1,16 @@
+#![recursion_limit = "256"]
+
 use burn::nn::attention::{
     AttnWindow, StreamingMqaCache, StreamingMultiQueryAttentionConfig, StreamingMqaParams,
 };
 use burn::nn::RotaryEncodingConfig;
 use burn::tensor::{backend::Backend, Distribution, Tensor};
-use burn::backend::ndarray::NdArray as B;
+use burn::backend::wgpu::{self, Wgpu as B, WgpuDevice};
 
 fn main() {
-    let device = <B as Backend>::Device::default();
+    // Initialize WGPU backend with Metal (MSL) on Apple platforms.
+    let device = WgpuDevice::default();
+    wgpu::init_setup::<wgpu::graphics::Metal>(&device, Default::default());
 
     // Simple GPT‑OSS‑style block demo: Streaming MQA + RoPE NTK/YaRN + sinks.
     let b = 1usize; // batch

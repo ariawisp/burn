@@ -1,9 +1,12 @@
+#![recursion_limit = "256"]
+
 use burn::nn::attention::{AttnWindow, StreamingMhaCache, StreamingMultiHeadAttentionConfig, StreamingParams};
 use burn::tensor::{backend::Backend, Distribution, Tensor};
-use burn::backend::ndarray::NdArray as B;
+use burn::backend::wgpu::{self, Wgpu as B, WgpuDevice};
 
 fn main() {
-    let device = <B as Backend>::Device::default();
+    let device = WgpuDevice::default();
+    wgpu::init_setup::<wgpu::graphics::Metal>(&device, Default::default());
 
     // Matrix‑Game‑2 inspired: demonstrate sink tokens for persistent memory anchors.
     let b = 1usize;

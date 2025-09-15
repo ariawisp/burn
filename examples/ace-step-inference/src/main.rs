@@ -1,10 +1,13 @@
+#![recursion_limit = "256"]
+
 use burn::nn::attention::{AttnWindow, StreamingMultiHeadAttentionConfig, StreamingMhaCache, StreamingParams};
 use burn::nn::RotaryEncodingConfig;
 use burn::tensor::{backend::Backend, Distribution, Tensor};
-use burn::backend::ndarray::NdArray as B;
+use burn::backend::wgpu::{self, Wgpu as B, WgpuDevice};
 
 fn main() {
-    let device = <B as Backend>::Device::default();
+    let device = WgpuDevice::default();
+    wgpu::init_setup::<wgpu::graphics::Metal>(&device, Default::default());
 
     // ACE‑Step inspired: streaming MHA with sliding window and optional attn_bias.
     let b = 2usize; // batch
