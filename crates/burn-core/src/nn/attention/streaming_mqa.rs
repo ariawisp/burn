@@ -197,6 +197,9 @@ pub struct StreamingMqaParams<'a, B: Backend> {
     pub window: AttnWindow,
     /// Optional sinks logits per (kv_head, group) pair, shape `[kv_heads, groups]`.
     pub sinks: Option<&'a Tensor<B, 2>>,
+    /// Optional additive attention bias with shape `[B, n_heads, q_len, k_len]`,
+    /// where `k_len` must match the active window length.
+    pub attn_bias: Option<&'a Tensor<B, 4>>,
 }
 
 impl<B: Backend> StreamingMultiQueryAttention<B> {
@@ -376,6 +379,11 @@ impl<B: Backend> StreamingMultiQueryAttention<B> {
             .div_scalar((self.d_k as f32).sqrt());
         attn_scores = self.dropout.forward(attn_scores);
 
+        // Additive attention bias (already shaped to window)
+        if let Some(bias) = params.attn_bias {
+            attn_scores = attn_scores + bias.clone();
+        }
+
         // Optional sinks bias: append as a sentinel column and then discard after softmax.
         let weights = if let Some(sinks) = params.sinks {
             // sinks: [kvH, groups] -> [nH]
@@ -425,4 +433,3 @@ impl<B: Backend> StreamingMultiQueryAttention<B> {
 }
 
 // Tests for this module are provided under crates/burn-core/tests/attention_mqa_streaming.rs
-

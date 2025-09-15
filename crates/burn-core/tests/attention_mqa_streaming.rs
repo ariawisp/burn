@@ -37,6 +37,7 @@ fn streaming_mqa_no_window_vs_full_window_equal() {
             start_pos: 0,
             window: AttnWindow::Full,
             sinks: None,
+            attn_bias: None,
         },
     );
 
@@ -56,6 +57,7 @@ fn streaming_mqa_no_window_vs_full_window_equal() {
             start_pos: 0,
             window: AttnWindow::Window(t),
             sinks: None,
+            attn_bias: None,
         },
     );
 
@@ -92,6 +94,7 @@ fn streaming_mqa_chunked_with_rope_matches_full_call() {
             start_pos: 0,
             window: AttnWindow::Window(t),
             sinks: None,
+            attn_bias: None,
         },
     );
 
@@ -109,6 +112,7 @@ fn streaming_mqa_chunked_with_rope_matches_full_call() {
             start_pos: start,
             window: AttnWindow::Window(t),
             sinks: None,
+            attn_bias: None,
         };
         let y = smqa.forward_streaming(x_i, &mut cache_chunked, params);
         outputs.push(y);
@@ -142,7 +146,7 @@ fn streaming_mqa_with_sinks_neg_infty_equivalence() {
     let out1 = smqa.forward_streaming(
         x.clone(),
         &mut cache1,
-        StreamingMqaParams { rope: None, start_pos: 0, window: AttnWindow::Full, sinks: None },
+        StreamingMqaParams { rope: None, start_pos: 0, window: AttnWindow::Full, sinks: None, attn_bias: None },
     );
 
     let mut cache2 = StreamingMqaCache::new(&device, b, 64, kv_heads, d_model / n_heads, 0);
@@ -150,7 +154,7 @@ fn streaming_mqa_with_sinks_neg_infty_equivalence() {
     let out2 = smqa.forward_streaming(
         x,
         &mut cache2,
-        StreamingMqaParams { rope: None, start_pos: 0, window: AttnWindow::Full, sinks: Some(&sinks) },
+        StreamingMqaParams { rope: None, start_pos: 0, window: AttnWindow::Full, sinks: Some(&sinks), attn_bias: None },
     );
 
     out1
