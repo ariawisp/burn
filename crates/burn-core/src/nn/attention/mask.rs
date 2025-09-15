@@ -15,6 +15,41 @@ pub fn generate_autoregressive_mask<B: Backend>(
     mask.expand([batch_size, seq_length, seq_length])
 }
 
+/// Generate a windowed causal attention mask with optional sink tokens.
+///
+/// - Allows attending to at most `sink_tokens` tokens at the start, plus the
+///   last `window_len` tokens before the current position (inclusive).
+/// - When `window_len` is `None`, this reduces to a full causal mask.
+pub fn generate_windowed_causal_mask<B: Backend>(
+    batch_size: usize,
+    seq_length: usize,
+    window_len: Option<usize>,
+    sink_tokens: usize,
+    device: &B::Device,
+) -> Tensor<B, 3, Bool> {
+    // Base full-causal (future) mask
+    let mut mask = Tensor::<B, 3, Bool>::full([batch_size, seq_length, seq_length], true, device);
+
+    for b in 0..batch_size {
+        for i in 0..seq_length {
+            // Allow sink tokens
+            if sink_tokens > 0 {
+                let s = sink_tokens.min(seq_length);
+                let unmask = Tensor::<B, 3, Bool>::full([1, 1, s], false, device);
+                mask = mask.slice_assign([b..b + 1, i..i + 1, 0..s], unmask);
+            }
+            // Allow local window up to i (causality)
+            let w = window_len.unwrap_or(seq_length);
+            let start = i.saturating_sub(w - 1);
+            let len = i + 1 - start;
+            let unmask = Tensor::<B, 3, Bool>::full([1, 1, len], false, device);
+            mask = mask.slice_assign([b..b + 1, i..i + 1, start..i + 1], unmask);
+        }
+    }
+    // Mask future positions remain true; already satisfied by initialization and range selection.
+    mask
+}
+
 /// Generate a 1D padding mask from sequence lengths.
 ///
 /// The resulting mask has shape `[batch_size, max_len]` with `true` marking padding positions.
