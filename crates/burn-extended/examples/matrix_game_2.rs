@@ -1,14 +1,13 @@
 #![recursion_limit = "256"]
 
-use burn::nn::attention::{AttnWindow, StreamingMhaCache, StreamingMultiHeadAttentionConfig, StreamingParams};
-use burn::tensor::{backend::Backend, Distribution, Tensor};
 use burn::backend::wgpu::{self, Wgpu as B, WgpuDevice};
+use burn::tensor::{Distribution, Tensor};
+use burn_extended::attention::{AttnWindow, ExtStreamingMultiHeadAttentionConfig, ExtStreamingParams};
 
 fn main() {
     let device = WgpuDevice::default();
     wgpu::init_setup::<wgpu::graphics::Metal>(&device, Default::default());
 
-    // Matrix‑Game‑2 inspired: demonstrate sink tokens for persistent memory anchors.
     let b = 1usize;
     let t = 32usize;
     let d_model = 96usize;
@@ -16,13 +15,13 @@ fn main() {
     let head_dim = d_model / n_heads;
     let chunk = 8usize;
     let cache_len = 64usize;
-    let sink_tokens = 4usize; // keep first 4 tokens always attendable
+    let sink_tokens = 4usize;
 
-    let smha = StreamingMultiHeadAttentionConfig::new(d_model, n_heads)
+    let smha = ExtStreamingMultiHeadAttentionConfig::new(d_model, n_heads)
         .with_dropout(0.0)
         .init::<B>(&device);
 
-    let mut cache = StreamingMhaCache::new(&device, b, cache_len, n_heads, head_dim, sink_tokens);
+    let mut cache = burn::nn::attention::StreamingMhaCache::new(&device, b, cache_len, n_heads, head_dim, sink_tokens);
     let x = Tensor::<B, 3>::random([b, t, d_model], Distribution::Default, &device);
 
     let mut outputs = Vec::new();
@@ -31,15 +30,11 @@ fn main() {
         let y = smha.forward_streaming(
             x.clone().slice([0..b, start..start + chunk, 0..d_model]),
             &mut cache,
-            StreamingParams {
-                rope: None,
-                start_pos: start,
-                window: AttnWindow::Window(16), // sliding window w/ sink preservation
-                attn_bias: None,
-            },
+            ExtStreamingParams { rope: None, start_pos: start, window: AttnWindow::Window(16), attn_bias: None },
         );
         outputs.push(y);
     }
     let y = Tensor::cat(outputs, 1);
-    println!("Matrix-Game-2 streaming w/ sinks output shape: {:?}", y.dims());
+    println!("matrix-game-2 example output shape: {:?}", y.dims());
 }
+

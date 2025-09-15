@@ -1,45 +1,36 @@
 #![recursion_limit = "256"]
 
-use burn::nn::attention::{
-    AttnWindow, StreamingMqaCache, StreamingMultiQueryAttentionConfig, StreamingMqaParams,
-};
-use burn::nn::RotaryEncodingConfig;
-use burn::tensor::{backend::Backend, Distribution, Tensor};
 use burn::backend::wgpu::{self, Wgpu as B, WgpuDevice};
+use burn::nn::RotaryEncodingConfig;
+use burn::tensor::{Distribution, Tensor};
+
+use burn_extended::attention::{
+    AttnWindow, StreamingMqaCache, StreamingMqaParams, StreamingMultiQueryAttentionConfig,
+};
+use burn_extended::rope::init_ntk_yarn;
 
 fn main() {
-    // Initialize WGPU backend with Metal (MSL) on Apple platforms.
     let device = WgpuDevice::default();
     wgpu::init_setup::<wgpu::graphics::Metal>(&device, Default::default());
 
-    // Simple GPT‑OSS‑style block demo: Streaming MQA + RoPE NTK/YaRN + sinks.
-    let b = 1usize; // batch
-    let t = 64usize; // total tokens
+    let b = 1usize;
+    let t = 64usize;
     let d_model = 256usize;
     let n_heads = 8usize;
-    let kv_heads = 2usize; // MQA/GQA
+    let kv_heads = 2usize;
     let head_dim = d_model / n_heads;
-    let chunk = 16usize; // stream in chunks
+    let chunk = 16usize;
     let cache_len = 256usize;
-    let sink_tokens = 0usize;
 
-    // Attention module
     let attn = StreamingMultiQueryAttentionConfig::new(d_model, n_heads, kv_heads)
         .with_dropout(0.0)
         .init::<B>(&device);
 
-    // RoPE with NTK/YaRN convenience
-    let rope = RotaryEncodingConfig::new(8192, head_dim)
-        .init_ntk_yarn::<B>(&device, /*scaling_factor*/ 32.0, /*init_ctx*/ 4096.0, /*alpha*/ 1.0, /*beta*/ 32.0);
-
-    // Simulated learned sinks logits per (kv_head, group)
+    let rope = init_ntk_yarn::<B>(8192, head_dim, &device, 32.0, 4096.0, 1.0, 32.0);
     let groups = n_heads / kv_heads;
     let sinks = Tensor::<B, 2>::random([kv_heads, groups], Distribution::Default, &device);
 
-    // Streaming cache
-    let mut cache = StreamingMqaCache::new(&device, b, cache_len, kv_heads, head_dim, sink_tokens);
-
-    // Dummy hidden states to run through attention
+    let mut cache = StreamingMqaCache::new(&device, b, cache_len, kv_heads, head_dim, 0);
     let x = Tensor::<B, 3>::random([b, t, d_model], Distribution::Default, &device);
 
     let mut outputs = Vec::new();
@@ -57,6 +48,6 @@ fn main() {
         outputs.push(y);
     }
     let y = Tensor::cat(outputs, 1);
-    let dims = y.dims();
-    println!("GPT-OSS streaming attention output shape: {:?}", dims);
+    println!("gpt-oss example output shape: {:?}", y.dims());
 }
+

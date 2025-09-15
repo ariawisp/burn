@@ -35,7 +35,6 @@ fn streaming_no_window_vs_full_window_equal() {
             rope: None,
             start_pos: 0,
             window: AttnWindow::Full,
-            attn_bias: None,
         },
     );
 
@@ -54,7 +53,6 @@ fn streaming_no_window_vs_full_window_equal() {
             rope: None,
             start_pos: 0,
             window: AttnWindow::Window(t),
-            attn_bias: None,
         },
     );
 
@@ -89,7 +87,6 @@ fn streaming_chunked_with_rope_matches_full_call() {
             rope: Some(&rope),
             start_pos: 0,
             window: AttnWindow::Window(t),
-            attn_bias: None,
         },
     );
 
@@ -106,7 +103,6 @@ fn streaming_chunked_with_rope_matches_full_call() {
             rope: Some(&rope),
             start_pos: start,
             window: AttnWindow::Window(t),
-            attn_bias: None,
         };
         let y = smha.forward_streaming(x_i, &mut cache_chunked, params);
         outputs.push(y);

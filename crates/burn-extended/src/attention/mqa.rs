@@ -1,8 +1,8 @@
-use crate as burn;
+use burn_core as burn;
 
-use crate::module::{Content, DisplaySettings, Module, ModuleDisplay};
-use crate::nn::{Dropout, DropoutConfig, Initializer, Linear, LinearConfig};
-use crate::{
+use burn::module::{Content, DisplaySettings, Module, ModuleDisplay};
+use burn::nn::{Dropout, DropoutConfig, Initializer, Linear, LinearConfig};
+use burn::{
     config::Config,
     tensor::{Bool, Tensor, backend::Backend},
 };

@@ -208,9 +208,6 @@ pub struct StreamingParams<'a, B: Backend> {
     pub start_pos: usize,
     /// Window selection policy.
     pub window: AttnWindow,
-    /// Optional additive attention bias with shape `[B, n_heads, q_len, k_len]`,
-    /// where `k_len` must match the active window length.
-    pub attn_bias: Option<&'a Tensor<B, 4>>,
 }
 
 impl<B: Backend> StreamingMultiHeadAttention<B> {
@@ -380,11 +377,6 @@ impl<B: Backend> StreamingMultiHeadAttention<B> {
             .matmul(k_win.transpose())
             .div_scalar((self.d_k as f32).sqrt());
         attn_scores = self.dropout.forward(attn_scores);
-
-        // Additive attention bias (already shaped to window)
-        if let Some(bias) = params.attn_bias {
-            attn_scores = attn_scores + bias.clone();
-        }
 
         let weights = if self.quiet_softmax {
             quiet_softmax(attn_scores, 3)

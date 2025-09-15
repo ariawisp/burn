@@ -1,0 +1,21 @@
+[package]
+name = "burn-extended"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Extended attention modules and utilities for Burn (MQA/GQA, sinks bias, RoPE NTK/YaRN), extracted as a separate crate for modular reuse."
+repository = "https://github.com/tracel-ai/burn"
+documentation = "https://docs.rs/burn-extended"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+burn-core = { path = "../burn-core", version = "0.19.0", default-features = false }
+burn-tensor = { path = "../burn-tensor", version = "0.19.0", default-features = false }
+
+[features]
+default = ["std"]
+std = ["burn-core/std"]
+

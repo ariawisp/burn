@@ -1,8 +1,8 @@
-use crate as burn;
+use burn_core as burn;
 
-use crate::module::{Content, DisplaySettings, Module, ModuleDisplay};
-use crate::nn::{Dropout, DropoutConfig, Initializer, Linear, LinearConfig};
-use crate::{
+use burn::module::{Content, DisplaySettings, Module, ModuleDisplay};
+use burn::nn::{Dropout, DropoutConfig, Initializer, Linear, LinearConfig};
+use burn::{
     config::Config,
     tensor::{Tensor, backend::Backend},
 };
@@ -190,7 +190,7 @@ impl<B: Backend> StreamingMqaCache<B> {
 /// Parameters for streaming MQA forward.
 pub struct StreamingMqaParams<'a, B: Backend> {
     /// Optional rotary encoding to apply to Q and K with an absolute start offset.
-    pub rope: Option<&'a crate::nn::rope_encoding::RotaryEncoding<B>>,
+    pub rope: Option<&'a burn::nn::rope_encoding::RotaryEncoding<B>>,
     /// Absolute position of the first token in the current chunk.
     pub start_pos: usize,
     /// Window selection policy.
@@ -363,7 +363,7 @@ impl<B: Backend> StreamingMultiQueryAttention<B> {
             ])
             .swap_dims(1, 2);
 
-        // Expand KV across groups to match Q heads: [B, nH, Tk/d_k]
+        // Expand KV across groups to match Q heads: [B, nH, Tk, d_k]
         let k_exp = k_win
             .unsqueeze_dim::<5>(2) // [B, kvH, 1, Tk, d_k]
             .repeat_dim(2, groups) // [B, kvH, groups, Tk, d_k]
@@ -432,4 +432,3 @@ impl<B: Backend> StreamingMultiQueryAttention<B> {
     }
 }
 
-// Tests for this module are provided under crates/burn-core/tests/attention_mqa_streaming.rs
