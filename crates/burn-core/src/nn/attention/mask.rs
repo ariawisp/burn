@@ -191,4 +191,7 @@ mod tests {
             false,
         );
     }
+
+    // Additional windowed causal mask tests are in integration tests under
+    // crates/burn-core/tests/attention_mask.rs
 }
