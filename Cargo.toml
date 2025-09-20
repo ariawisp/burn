@@ -169,9 +169,9 @@ portable-atomic = { version = "1.11.1" }
 portable-atomic-util = { version = "0.2.4", features = ["alloc"] }
 
 ### For the main burn branch. ###
-cubecl = { git = "https://github.com/ariawisp/cubecl", default-features = false, rev = "7e61cf750bf493bd41d0d248b2e0b39dbe95f6d6" }
-cubecl-common = { git = "https://github.com/ariawisp/cubecl", default-features = false, rev = "7e61cf750bf493bd41d0d248b2e0b39dbe95f6d6" }
-cubecl-quant = { git = "https://github.com/ariawisp/cubecl", default-features = false, rev = "7e61cf750bf493bd41d0d248b2e0b39dbe95f6d6" }
+cubecl = { git = "https://github.com/ariawisp/cubecl", default-features = false, rev = "40784f472f05105390b17d229cd69e5aaf2c7345" }
+cubecl-common = { git = "https://github.com/ariawisp/cubecl", default-features = false, rev = "40784f472f05105390b17d229cd69e5aaf2c7345" }
+cubecl-quant = { git = "https://github.com/ariawisp/cubecl", default-features = false, rev = "40784f472f05105390b17d229cd69e5aaf2c7345" }
 ### For local development. ###
 # cubecl = { path = "../cubecl/crates/cubecl", default-features = false }
 # cubecl-common = { path = "../cubecl/crates/cubecl-common", default-features = false }
