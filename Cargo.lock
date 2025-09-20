@@ -996,6 +996,7 @@ dependencies = [
  "burn",
  "burn-candle",
  "burn-core",
+ "burn-cubecl",
  "burn-cuda",
  "burn-import",
  "burn-ndarray",

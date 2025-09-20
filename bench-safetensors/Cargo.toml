@@ -1,0 +1,24 @@
+[package]
+name = "bench-safetensors"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+
+[dependencies]
+# Path deps will be edited to point to a specific worktree per run
+burn-core = { path = "../crates/burn-core", version = "0.19.0" }
+burn-store = { path = "../crates/burn-store", version = "0.19.0", features=["std"] }
+burn-wgpu = { path = "../crates/burn-wgpu", default-features = false, version = "0.19.0", features=["metal"] }
+burn-cubecl = { path = "../crates/burn-cubecl", default-features = false, version = "0.19.0" }
+burn-tensor = { path = "../crates/burn-tensor", version = "0.19.0" }
+divan = "0.1"
+tempfile = "3"
+
+[dev-dependencies]
+
+[features]
+batched = []
+
+[[bench]]
+name = "compare"
+harness = false

@@ -1,3 +1,14 @@
+//! Batch creation operations for tensors.
+//!
+//! Backends can implement these hooks to accelerate creating a large
+//! number of tensors in one pass, reducing per-tensor overhead.
+/// Batch creation hooks for backends.
+///
+/// This optional trait enables high-throughput creation of many tensors
+/// by amortizing allocation and upload overhead across a batch.
+/// Implementations may group tensors by device and perform a single
+/// backend call to materialize them efficiently.
+use alloc::vec::Vec;
 use crate::backend::Backend;
 use crate::tensor::ops::{BoolTensor, Device, FloatTensor, IntTensor};
 use crate::TensorData;
@@ -13,4 +24,3 @@ pub trait BatchTensorOps: Backend {
     /// Create many bool tensors at once.
     fn bool_batch_from_data(items: Vec<(TensorData, Device<Self>)>) -> Vec<BoolTensor<Self>>;
 }
-

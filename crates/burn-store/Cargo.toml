@@ -18,7 +18,7 @@ workspace = true
 default = ["std"]
 std = ["dep:memmap2", "safetensors/std", "burn-core/std", "burn-tensor/std", "dep:regex"]
 cubecl-batch = []
-wgpu = ["burn-wgpu", "cubecl-batch"]
+wgpu = ["burn-wgpu"]
 metal = ["wgpu", "burn-wgpu/metal"]
 cuda = ["burn-cuda"]
 candle = ["burn-candle"]
@@ -49,6 +49,7 @@ burn-tch = { path = "../burn-tch", version = "0.19.0", optional = true }
 burn = { path = "../burn", version = "0.19.0" }
 burn-import = { path = "../burn-import", version = "0.19.0" }
 burn-ndarray = { path = "../burn-ndarray", version = "0.19.0" }
+burn-cubecl = { path = "../burn-cubecl", version = "0.19.0" }
 divan = "0.1"
 tempfile = { workspace = true }
 

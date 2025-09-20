@@ -322,6 +322,8 @@
 //! - **Simple parsing**: Standard JSON header with fixed structure
 
 mod store;
+// Re-export batched apply helper implemented inside store module.
+pub use store::apply_batched;
 
 pub use store::{SafetensorsError, SafetensorsStore};
 

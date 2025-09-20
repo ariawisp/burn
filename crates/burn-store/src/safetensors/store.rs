@@ -15,6 +15,8 @@ use alloc::vec::Vec;
 use burn_core::module::ParamId;
 use burn_tensor::backend::Backend;
 use burn_tensor::{DType, TensorData};
+use burn_tensor::{Bool as BoolTy, Int as IntTy, Tensor};
+use burn_tensor::BatchTensorOps;
 use core::fmt;
 use core::ops::Deref;
 use hashbrown::HashMap;
@@ -657,172 +659,6 @@ impl ModuleSnapshoter for SafetensorsStore {
         }
     }
 
-    fn apply_to<B: Backend, M: ModuleSnapshot<B>>(
-        &mut self,
-        module: &mut M,
-    ) -> Result<ApplyResult, Self::Error> {
-        use burn_tensor::batch::BatchTensorOps;
-        use burn_core::module::ModuleMapper;
-
-        // Build snapshot map (post adapters/filters)
-        let mut snapshots = match self {
-            #[cfg(feature = "std")]
-            Self::File(p) => safetensors_to_snapshots_lazy_file(&p.path)?,
-            Self::Memory(p) => {
-                let data_arc = p
-                    .data
-                    .clone()
-                    .ok_or_else(|| SafetensorsError::Other("No data loaded".to_string()))?;
-                safetensors_to_snapshots_lazy(data_arc)?
-            }
-        };
-        let from_adapter = self.get_from_adapter();
-        snapshots = snapshots
-            .into_iter()
-            .filter_map(|snapshot| from_adapter.adapt_tensor(&snapshot))
-            .collect();
-
-        // Index snapshots by path
-        let mut snap_by_path: HashMap<String, TensorSnapshot> = HashMap::new();
-        for s in snapshots.into_iter() {
-            snap_by_path.insert(s.full_path(), s);
-        }
-
-        // Probe target module expectations
-        enum Kind { Float, Int, Bool }
-        struct Expect<B: Backend> {
-            list: Vec<(String, Kind, Vec<usize>, DType, B::Device)>,
-            path_stack: Vec<String>,
-        }
-        impl<B: Backend> Expect<B> { fn new() -> Self { Self { list: Vec::new(), path_stack: Vec::new() } } fn cur(&self) -> String { self.path_stack.join(".") } }
-        impl<B: Backend> burn_core::module::ModuleMapper<B> for Expect<B> {
-            fn enter_module(&mut self, name: &str, _container_type: &str) { self.path_stack.push(name.to_string()); }
-            fn exit_module(&mut self, _name: &str, _container_type: &str) { self.path_stack.pop(); }
-            fn map_float<const D: usize>(&mut self, _id: burn_core::module::ParamId, t: burn_tensor::Tensor<B,D>) -> burn_tensor::Tensor<B,D> {
-                let path = self.cur();
-                self.list.push((path, Kind::Float, t.shape().dims.to_vec(), t.dtype(), t.device()));
-                t
-            }
-            fn map_int<const D: usize>(&mut self, _id: burn_core::module::ParamId, t: burn_tensor::Tensor<B,D,burn_tensor::Int>) -> burn_tensor::Tensor<B,D,burn_tensor::Int> {
-                let path = self.cur();
-                self.list.push((path, Kind::Int, t.shape().dims.to_vec(), t.dtype(), t.device()));
-                t
-            }
-            fn map_bool<const D: usize>(&mut self, _id: burn_core::module::ParamId, t: burn_tensor::Tensor<B,D,burn_tensor::Bool>) -> burn_tensor::Tensor<B,D,burn_tensor::Bool> {
-                let path = self.cur();
-                self.list.push((path, Kind::Bool, t.shape().dims.to_vec(), t.dtype(), t.device()));
-                t
-            }
-        }
-
-        let mut probe = Expect::<B>::new();
-        let _ = module.clone().map(&mut probe);
-
-        // Prepare batched inputs
-        let mut float_items: Vec<(TensorData, B::Device, String)> = Vec::new();
-        let mut int_items: Vec<(TensorData, B::Device, String)> = Vec::new();
-        let mut bool_items: Vec<(TensorData, B::Device, String)> = Vec::new();
-        let mut applied: Vec<String> = Vec::new();
-        let mut missing: Vec<String> = Vec::new();
-        let mut errors: Vec<String> = Vec::new();
-
-        for (path, kind, shape, target_dtype, device) in probe.list.into_iter() {
-            match snap_by_path.remove(&path) {
-                None => {
-                    missing.push(path);
-                }
-                Some(view) => {
-                    let data0 = view.to_data();
-                    if data0.shape != shape {
-                        errors.push(format!("Shape mismatch for '{}': expected {:?}, found {:?}", path, shape, data0.shape));
-                        continue;
-                    }
-                    // Only allow conversions within same kind; clone-convert to avoid mutating read-only bytes.
-                    if data0.dtype != target_dtype {
-                        errors.push(format!("Type mismatch for '{}': expected {:?}, found {:?}", path, target_dtype, data0.dtype));
-                        continue;
-                    }
-                    let data = data0;
-                    match kind {
-                        Kind::Float => float_items.push((data, device.clone(), path.clone())),
-                        Kind::Int => int_items.push((data, device.clone(), path.clone())),
-                        Kind::Bool => bool_items.push((data, device.clone(), path.clone())),
-                    }
-                    applied.push(path);
-                }
-            }
-        }
-
-        // Batched create via backend hook
-        let floats = <B as BatchTensorOps>::float_batch_from_data(
-            float_items.iter().map(|(d, dev, _)| (d.clone(), dev.clone())).collect(),
-        );
-        let ints = <B as BatchTensorOps>::int_batch_from_data(
-            int_items.iter().map(|(d, dev, _)| (d.clone(), dev.clone())).collect(),
-        );
-        let bools = <B as BatchTensorOps>::bool_batch_from_data(
-            bool_items.iter().map(|(d, dev, _)| (d.clone(), dev.clone())).collect(),
-        );
-
-        // Assemble map path -> TensorPrimitive (move, no clones)
-        use hashbrown::HashMap as StdHashMap;
-        let mut float_map: StdHashMap<String, burn_tensor::ops::FloatTensor<B>> = StdHashMap::new();
-        let mut int_map: StdHashMap<String, burn_tensor::ops::IntTensor<B>> = StdHashMap::new();
-        let mut bool_map: StdHashMap<String, burn_tensor::ops::BoolTensor<B>> = StdHashMap::new();
-        for ((_, _, path), prim) in float_items.into_iter().zip(floats.into_iter()) { let _ = float_map.insert(path, prim); }
-        for ((_, _, path), prim) in int_items.into_iter().zip(ints.into_iter()) { let _ = int_map.insert(path, prim); }
-        for ((_, _, path), prim) in bool_items.into_iter().zip(bools.into_iter()) { let _ = bool_map.insert(path, prim); }
-
-        // Mapper that installs prepared tensors
-        struct InstallApplier<'a, B: Backend> {
-            floats: &'a mut StdHashMap<String, burn_tensor::ops::FloatTensor<B>>,
-            ints: &'a mut StdHashMap<String, burn_tensor::ops::IntTensor<B>>,
-            bools: &'a mut StdHashMap<String, burn_tensor::ops::BoolTensor<B>>,
-            path: Vec<String>,
-        }
-        impl<'a, B: Backend> InstallApplier<'a, B> { fn new(
-            floats: &'a mut StdHashMap<String, burn_tensor::ops::FloatTensor<B>>,
-            ints: &'a mut StdHashMap<String, burn_tensor::ops::IntTensor<B>>,
-            bools: &'a mut StdHashMap<String, burn_tensor::ops::BoolTensor<B>>,
-        ) -> Self { Self { floats, ints, bools, path: Vec::new() } } fn cur(&self) -> String { self.path.join(".") } }
-        impl<'a, B: Backend> burn_core::module::ModuleMapper<B> for InstallApplier<'a, B> {
-            fn enter_module(&mut self, name: &str, _ty: &str) { self.path.push(name.to_string()); }
-            fn exit_module(&mut self, _n: &str, _ty: &str) { self.path.pop(); }
-            fn map_float<const D: usize>(&mut self, _id: burn_core::module::ParamId, _t: burn_tensor::Tensor<B,D>) -> burn_tensor::Tensor<B,D> {
-                let key = self.cur();
-                let prim = self.floats.remove(&key).expect("missing prepared float tensor");
-                burn_tensor::Tensor::from_primitive(burn_tensor::TensorPrimitive::Float(prim))
-            }
-            fn map_int<const D: usize>(&mut self, _id: burn_core::module::ParamId, _t: burn_tensor::Tensor<B,D,burn_tensor::Int>) -> burn_tensor::Tensor<B,D,burn_tensor::Int> {
-                let key = self.cur();
-                let prim = self.ints.remove(&key).expect("missing prepared int tensor");
-                burn_tensor::Tensor::from_primitive(prim)
-            }
-            fn map_bool<const D: usize>(&mut self, _id: burn_core::module::ParamId, _t: burn_tensor::Tensor<B,D,burn_tensor::Bool>) -> burn_tensor::Tensor<B,D,burn_tensor::Bool> {
-                let key = self.cur();
-                let prim = self.bools.remove(&key).expect("missing prepared bool tensor");
-                burn_tensor::Tensor::from_primitive(prim)
-            }
-        }
-
-        // Apply prepared tensors
-        let mut installer = InstallApplier::<B>::new(&mut float_map, &mut int_map, &mut bool_map);
-        *module = module.clone().map(&mut installer);
-
-        // Build ApplyResult
-        let unused: Vec<String> = snap_by_path.keys().cloned().collect();
-        let result = ApplyResult { applied, skipped: Vec::new(), missing, unused, errors };
-
-        if self.get_validate() && !result.errors.is_empty() {
-            return Err(SafetensorsError::ValidationFailed(format!("Import errors: {:?}", result.errors)));
-        }
-
-        if !self.get_allow_partial() && !result.missing.is_empty() {
-            return Err(SafetensorsError::TensorNotFound(format!("Missing tensors: {:?}", result.missing)));
-        }
-
-        Ok(result)
-    }
 }
 
 impl SafetensorsStore {
@@ -1088,4 +924,233 @@ fn dtype_to_safetensors(dtype: DType) -> Result<safetensors::Dtype, SafetensorsE
             "Quantized tensors not yet supported in safetensors".to_string(),
         )),
     }
+}
+
+/// Apply tensors using a batched creation path.
+///
+/// This function parses safetensors lazily (zero-copy/mmap when std), applies the
+/// store's adapters, filters and remapping, validates shapes/dtypes, then creates
+/// tensors in batches grouped by device using [`BatchTensorOps`].
+///
+/// It mirrors the default `apply_to` validation semantics for `validate` and `allow_partial`.
+pub fn apply_batched<B, M>(store: &mut SafetensorsStore, module: &mut M) -> Result<crate::ApplyResult, SafetensorsError>
+where
+    B: Backend + BatchTensorOps,
+    M: crate::ModuleSnapshot<B>,
+{
+    use burn_core::module::{ModuleMapper, ParamId};
+    use hashbrown::{HashMap as Map, HashSet};
+
+    // 1) Load snapshots lazily from file/bytes (zero-copy where possible).
+    let mut snapshots = match store {
+        #[cfg(feature = "std")]
+        SafetensorsStore::File(p) => safetensors_to_snapshots_lazy_file(&p.path)?,
+        SafetensorsStore::Memory(p) => {
+            let data_arc = p
+                .data
+                .clone()
+                .ok_or_else(|| SafetensorsError::Other("No data loaded".to_string()))?;
+            safetensors_to_snapshots_lazy(data_arc)?
+        }
+    };
+
+    // 2) Apply from_adapter + filter + (std) remap
+    let from_adapter = store.get_from_adapter();
+    snapshots = snapshots
+        .into_iter()
+        .filter_map(|s| from_adapter.adapt_tensor(&s))
+        .collect();
+    let snapshots = apply_filter(snapshots, store.get_filter());
+    #[cfg(feature = "std")]
+    let snapshots = apply_remapping(snapshots, store.get_remapper());
+
+    // 3) Build map of path -> snapshot
+    let mut snap_map: Map<String, crate::TensorSnapshot> = Map::new();
+    for s in snapshots.into_iter() {
+        snap_map.insert(s.full_path(), s);
+    }
+
+    // 4) Probe module for expected tensors: (path, kind, shape, dtype, device)
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Kind {
+        Float,
+        Int,
+        Bool,
+    }
+    struct Probe<B: Backend> {
+        list: Vec<(String, Kind, Vec<usize>, DType, B::Device)>,
+        path: Vec<String>,
+    }
+    impl<B: Backend> Probe<B> {
+        fn new() -> Self {
+            Self { list: Vec::new(), path: Vec::new() }
+        }
+        fn cur(&self) -> String { self.path.join(".") }
+    }
+    impl<B: Backend> ModuleMapper<B> for Probe<B> {
+        fn enter_module(&mut self, name: &str, _container_type: &str) { self.path.push(name.to_string()); }
+        fn exit_module(&mut self, _name: &str, _container_type: &str) { self.path.pop(); }
+        fn map_float<const D: usize>(&mut self, _id: ParamId, t: Tensor<B, D>) -> Tensor<B, D> {
+            self.list.push((self.cur(), Kind::Float, t.shape().dims.to_vec(), t.dtype(), t.device()));
+            t
+        }
+        fn map_int<const D: usize>(&mut self, _id: ParamId, t: Tensor<B, D, IntTy>) -> Tensor<B, D, IntTy> {
+            self.list.push((self.cur(), Kind::Int, t.shape().dims.to_vec(), t.dtype(), t.device()));
+            t
+        }
+        fn map_bool<const D: usize>(&mut self, _id: ParamId, t: Tensor<B, D, BoolTy>) -> Tensor<B, D, BoolTy> {
+            self.list.push((self.cur(), Kind::Bool, t.shape().dims.to_vec(), t.dtype(), t.device()));
+            t
+        }
+    }
+
+    let mut probe = Probe::<B>::new();
+    let _ = module.clone().map(&mut probe);
+
+    // 5) Validate and collect batch items grouped by kind.
+    let mut applied: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut visited: HashSet<String> = HashSet::new();
+
+    // Items: (TensorData, Device, path)
+    let mut floats: Vec<(TensorData, <B as Backend>::Device, String)> = Vec::new();
+    let mut ints: Vec<(TensorData, <B as Backend>::Device, String)> = Vec::new();
+    let mut bools: Vec<(TensorData, <B as Backend>::Device, String)> = Vec::new();
+
+    for (path, kind, expect_shape, expect_dtype, device) in probe.list.iter() {
+        visited.insert(path.clone());
+        match snap_map.get(path) {
+            None => { /* missing will be computed later */ },
+            Some(view) => {
+                // Shape check
+                if &view.shape != expect_shape {
+                    errors.push(format!(
+                        "Shape mismatch for '{}': expected {:?}, found {:?}",
+                        path, expect_shape, view.shape
+                    ));
+                    continue;
+                }
+                // DType check
+                if view.dtype != *expect_dtype {
+                    errors.push(format!(
+                        "Type mismatch for '{}': expected {:?}, found {:?}",
+                        path, expect_dtype, view.dtype
+                    ));
+                    continue;
+                }
+                // Accept: capture data without cloning buffers.
+                let data = view.to_data();
+                match kind {
+                    Kind::Float => floats.push((data, device.clone(), path.clone())),
+                    Kind::Int => ints.push((data, device.clone(), path.clone())),
+                    Kind::Bool => bools.push((data, device.clone(), path.clone())),
+                }
+                applied.push(path.clone()); // tentatively, final install will overwrite
+            }
+        }
+    }
+
+    // 6) Batch-create primitives by kind using backend hook.
+    let f_prims = <B as BatchTensorOps>::float_batch_from_data(
+        floats.iter().map(|(d, dev, _)| (d.clone(), dev.clone())).collect(),
+    );
+    let i_prims = <B as BatchTensorOps>::int_batch_from_data(
+        ints.iter().map(|(d, dev, _)| (d.clone(), dev.clone())).collect(),
+    );
+    let b_prims = <B as BatchTensorOps>::bool_batch_from_data(
+        bools.iter().map(|(d, dev, _)| (d.clone(), dev.clone())).collect(),
+    );
+
+    // 7) Build maps path -> primitive for installation pass.
+    use hashbrown::HashMap as StdMap;
+    let mut f_map: StdMap<String, burn_tensor::ops::FloatTensor<B>> = StdMap::new();
+    let mut i_map: StdMap<String, burn_tensor::ops::IntTensor<B>> = StdMap::new();
+    let mut b_map: StdMap<String, burn_tensor::ops::BoolTensor<B>> = StdMap::new();
+    for ((_, _, path), prim) in floats.into_iter().zip(f_prims.into_iter()) { f_map.insert(path, prim); }
+    for ((_, _, path), prim) in ints.into_iter().zip(i_prims.into_iter()) { i_map.insert(path, prim); }
+    for ((_, _, path), prim) in bools.into_iter().zip(b_prims.into_iter()) { b_map.insert(path, prim); }
+
+    // 8) Install tensors into module by path using a ModuleMapper pass.
+    struct Installer<'a, B: Backend> {
+        f: &'a mut StdMap<String, burn_tensor::ops::FloatTensor<B>>,
+        i: &'a mut StdMap<String, burn_tensor::ops::IntTensor<B>>,
+        b: &'a mut StdMap<String, burn_tensor::ops::BoolTensor<B>>,
+        path: Vec<String>,
+    }
+    impl<'a, B: Backend> Installer<'a, B> {
+        fn new(
+            f: &'a mut StdMap<String, burn_tensor::ops::FloatTensor<B>>,
+            i: &'a mut StdMap<String, burn_tensor::ops::IntTensor<B>>,
+            b: &'a mut StdMap<String, burn_tensor::ops::BoolTensor<B>>,
+        ) -> Self {
+            Self { f, i, b, path: Vec::new() }
+        }
+        fn cur(&self) -> String { self.path.join(".") }
+    }
+    impl<'a, B: Backend> ModuleMapper<B> for Installer<'a, B> {
+        fn enter_module(&mut self, name: &str, _container_type: &str) { self.path.push(name.to_string()); }
+        fn exit_module(&mut self, _name: &str, _container_type: &str) { self.path.pop(); }
+        fn map_float<const D: usize>(&mut self, _id: ParamId, _t: Tensor<B, D>) -> Tensor<B, D> {
+            let key = self.cur();
+            match self.f.remove(&key) {
+                Some(prim) => Tensor::from_primitive(burn_tensor::TensorPrimitive::Float(prim)),
+                None => _t,
+            }
+        }
+        fn map_int<const D: usize>(&mut self, _id: ParamId, _t: Tensor<B, D, IntTy>) -> Tensor<B, D, IntTy> {
+            let key = self.cur();
+            match self.i.remove(&key) {
+                Some(prim) => Tensor::from_primitive(prim),
+                None => _t,
+            }
+        }
+        fn map_bool<const D: usize>(&mut self, _id: ParamId, _t: Tensor<B, D, BoolTy>) -> Tensor<B, D, BoolTy> {
+            let key = self.cur();
+            match self.b.remove(&key) {
+                Some(prim) => Tensor::from_primitive(prim),
+                None => _t,
+            }
+        }
+    }
+
+    let mut installer = Installer::<B>::new(&mut f_map, &mut i_map, &mut b_map);
+    *module = module.clone().map(&mut installer);
+
+    // 9) Build ApplyResult consistent with default path.
+    // Unused: entries present in source but not visited.
+    let unused: Vec<String> = snap_map
+        .keys()
+        .filter(|p| !visited.contains(*p))
+        .cloned()
+        .collect();
+
+    // Missing: visited but not present in source.
+    let missing: Vec<String> = visited
+        .into_iter()
+        .filter(|p| !snap_map.contains_key(p))
+        .collect();
+
+    let result = crate::ApplyResult {
+        applied,
+        skipped: Vec::new(),
+        missing,
+        unused,
+        errors,
+    };
+
+    // 10) Validation semantics like default apply_to
+    if store.get_validate() && !result.errors.is_empty() {
+        return Err(SafetensorsError::ValidationFailed(format!(
+            "Import errors: {:?}",
+            result.errors
+        )));
+    }
+    if !store.get_allow_partial() && !result.missing.is_empty() {
+        return Err(SafetensorsError::TensorNotFound(format!(
+            "Missing tensors: {:?}",
+            result.missing
+        )));
+    }
+
+    Ok(result)
 }

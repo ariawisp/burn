@@ -2,7 +2,8 @@ use crate::{CubeBackend, CubeRuntime};
 use crate::tensor::CubeTensor;
 use alloc::vec::Vec;
 use burn_tensor::backend::Backend;
-use burn_tensor::tensor::batch::BatchTensorOps;
+use burn_tensor::BatchTensorOps;
+use burn_tensor::Shape;
 use burn_tensor::TensorData;
 use cubecl::server::AllocationDescriptor;
 
@@ -76,7 +77,7 @@ fn batch_create<R: CubeRuntime>(
         let allocations = client.create_tensors(descs);
 
         for (idx, alloc) in allocations.into_iter().enumerate() {
-            let shape = cubecl::prelude::Shape::from(shapes[idx].clone());
+            let shape = Shape::from(shapes[idx].clone());
             let tensor = CubeTensor::new_contiguous(
                 client.clone(),
                 first_dev.clone(),
