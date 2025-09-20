@@ -1,6 +1,7 @@
 pub(crate) mod stats;
 
 mod api;
+pub mod batch;
 mod data;
 mod distribution;
 mod element;

@@ -27,6 +27,24 @@ use alloc::sync::Arc;
 #[cfg(not(target_has_atomic = "ptr"))]
 type Arc<T> = Box<T>;
 
+#[cfg(feature = "std")]
+use burn_tensor::{Allocation, AllocationController, Bytes};
+
+#[cfg(feature = "std")]
+struct MmapAllocationController {
+    _mmap: Arc<memmap2::Mmap>,
+}
+
+#[cfg(feature = "std")]
+impl AllocationController for MmapAllocationController {
+    fn dealloc(&mut self, _allocation: &Allocation) {
+        // Memory is unmapped automatically when Arc<Mmap> is dropped.
+    }
+    fn can_be_detached(&self) -> bool {
+        false
+    }
+}
+
 /// Errors that can occur during SafeTensors operations.
 #[derive(Debug)]
 pub enum SafetensorsError {
@@ -479,6 +497,7 @@ impl safetensors::View for TensorSnapshotAdapter {
     }
 }
 
+#[cfg(not(feature = "cubecl-batch"))]
 impl ModuleSnapshoter for SafetensorsStore {
     type Error = SafetensorsError;
 
@@ -584,6 +603,222 @@ impl ModuleSnapshoter for SafetensorsStore {
                 "Missing tensors: {:?}",
                 result.missing
             )));
+        }
+
+        Ok(result)
+    }
+}
+
+#[cfg(feature = "cubecl-batch")]
+impl ModuleSnapshoter for SafetensorsStore {
+    type Error = SafetensorsError;
+
+    fn collect_from<B: Backend, M: ModuleSnapshot<B>>(
+        &mut self,
+        module: &M,
+    ) -> Result<(), Self::Error> {
+        // Reuse default
+        #[cfg(not(feature = "cubecl-batch"))]
+        unreachable!();
+        #[cfg(feature = "cubecl-batch")]
+        {
+            // fall back to default collection path independent of feature
+            let mut snapshots = module.collect();
+            let to_adapter = self.get_to_adapter();
+            snapshots = snapshots
+                .into_iter()
+                .filter_map(|snapshot| to_adapter.adapt_tensor(&snapshot))
+                .collect();
+            let snapshots = apply_filter(snapshots, self.get_filter());
+            #[cfg(feature = "std")]
+            let snapshots = apply_remapping(snapshots, self.get_remapper());
+            let metadata = self.get_metadata().clone();
+            #[cfg(feature = "std")]
+            let std_metadata: std::collections::HashMap<String, String> = metadata
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            match self {
+                #[cfg(feature = "std")]
+                Self::File(p) => {
+                    let tensors = snapshots_to_safetensors(snapshots)?;
+                    safetensors::serialize_to_file(tensors, Some(std_metadata), &p.path)?;
+                    Ok(())
+                }
+                Self::Memory(p) => {
+                    #[cfg(feature = "std")]
+                    let data = safetensors::serialize(snapshots_to_safetensors(snapshots)?, Some(std_metadata))?;
+                    #[cfg(not(feature = "std"))]
+                    let data = safetensors::serialize(snapshots_to_safetensors(snapshots)?, Some(metadata))?;
+                    p.data = Some(Arc::new(data));
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn apply_to<B: Backend, M: ModuleSnapshot<B>>(
+        &mut self,
+        module: &mut M,
+    ) -> Result<ApplyResult, Self::Error> {
+        use burn_tensor::batch::BatchTensorOps;
+        use burn_core::module::ModuleMapper;
+
+        // Build snapshot map (post adapters/filters)
+        let mut snapshots = match self {
+            #[cfg(feature = "std")]
+            Self::File(p) => safetensors_to_snapshots_lazy_file(&p.path)?,
+            Self::Memory(p) => {
+                let data_arc = p
+                    .data
+                    .clone()
+                    .ok_or_else(|| SafetensorsError::Other("No data loaded".to_string()))?;
+                safetensors_to_snapshots_lazy(data_arc)?
+            }
+        };
+        let from_adapter = self.get_from_adapter();
+        snapshots = snapshots
+            .into_iter()
+            .filter_map(|snapshot| from_adapter.adapt_tensor(&snapshot))
+            .collect();
+
+        // Index snapshots by path
+        let mut snap_by_path: HashMap<String, TensorSnapshot> = HashMap::new();
+        for s in snapshots.into_iter() {
+            snap_by_path.insert(s.full_path(), s);
+        }
+
+        // Probe target module expectations
+        enum Kind { Float, Int, Bool }
+        struct Expect<B: Backend> {
+            list: Vec<(String, Kind, Vec<usize>, DType, B::Device)>,
+            path_stack: Vec<String>,
+        }
+        impl<B: Backend> Expect<B> { fn new() -> Self { Self { list: Vec::new(), path_stack: Vec::new() } } fn cur(&self) -> String { self.path_stack.join(".") } }
+        impl<B: Backend> burn_core::module::ModuleMapper<B> for Expect<B> {
+            fn enter_module(&mut self, name: &str, _container_type: &str) { self.path_stack.push(name.to_string()); }
+            fn exit_module(&mut self, _name: &str, _container_type: &str) { self.path_stack.pop(); }
+            fn map_float<const D: usize>(&mut self, _id: burn_core::module::ParamId, t: burn_tensor::Tensor<B,D>) -> burn_tensor::Tensor<B,D> {
+                let path = self.cur();
+                self.list.push((path, Kind::Float, t.shape().dims.to_vec(), t.dtype(), t.device()));
+                t
+            }
+            fn map_int<const D: usize>(&mut self, _id: burn_core::module::ParamId, t: burn_tensor::Tensor<B,D,burn_tensor::Int>) -> burn_tensor::Tensor<B,D,burn_tensor::Int> {
+                let path = self.cur();
+                self.list.push((path, Kind::Int, t.shape().dims.to_vec(), t.dtype(), t.device()));
+                t
+            }
+            fn map_bool<const D: usize>(&mut self, _id: burn_core::module::ParamId, t: burn_tensor::Tensor<B,D,burn_tensor::Bool>) -> burn_tensor::Tensor<B,D,burn_tensor::Bool> {
+                let path = self.cur();
+                self.list.push((path, Kind::Bool, t.shape().dims.to_vec(), t.dtype(), t.device()));
+                t
+            }
+        }
+
+        let mut probe = Expect::<B>::new();
+        let _ = module.clone().map(&mut probe);
+
+        // Prepare batched inputs
+        let mut float_items: Vec<(TensorData, B::Device, String)> = Vec::new();
+        let mut int_items: Vec<(TensorData, B::Device, String)> = Vec::new();
+        let mut bool_items: Vec<(TensorData, B::Device, String)> = Vec::new();
+        let mut applied: Vec<String> = Vec::new();
+        let mut missing: Vec<String> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+
+        for (path, kind, shape, target_dtype, device) in probe.list.into_iter() {
+            match snap_by_path.remove(&path) {
+                None => {
+                    missing.push(path);
+                }
+                Some(view) => {
+                    let data0 = view.to_data();
+                    if data0.shape != shape {
+                        errors.push(format!("Shape mismatch for '{}': expected {:?}, found {:?}", path, shape, data0.shape));
+                        continue;
+                    }
+                    // Only allow conversions within same kind; clone-convert to avoid mutating read-only bytes.
+                    if data0.dtype != target_dtype {
+                        errors.push(format!("Type mismatch for '{}': expected {:?}, found {:?}", path, target_dtype, data0.dtype));
+                        continue;
+                    }
+                    let data = data0;
+                    match kind {
+                        Kind::Float => float_items.push((data, device.clone(), path.clone())),
+                        Kind::Int => int_items.push((data, device.clone(), path.clone())),
+                        Kind::Bool => bool_items.push((data, device.clone(), path.clone())),
+                    }
+                    applied.push(path);
+                }
+            }
+        }
+
+        // Batched create via backend hook
+        let floats = <B as BatchTensorOps>::float_batch_from_data(
+            float_items.iter().map(|(d, dev, _)| (d.clone(), dev.clone())).collect(),
+        );
+        let ints = <B as BatchTensorOps>::int_batch_from_data(
+            int_items.iter().map(|(d, dev, _)| (d.clone(), dev.clone())).collect(),
+        );
+        let bools = <B as BatchTensorOps>::bool_batch_from_data(
+            bool_items.iter().map(|(d, dev, _)| (d.clone(), dev.clone())).collect(),
+        );
+
+        // Assemble map path -> TensorPrimitive (move, no clones)
+        use hashbrown::HashMap as StdHashMap;
+        let mut float_map: StdHashMap<String, burn_tensor::ops::FloatTensor<B>> = StdHashMap::new();
+        let mut int_map: StdHashMap<String, burn_tensor::ops::IntTensor<B>> = StdHashMap::new();
+        let mut bool_map: StdHashMap<String, burn_tensor::ops::BoolTensor<B>> = StdHashMap::new();
+        for ((_, _, path), prim) in float_items.into_iter().zip(floats.into_iter()) { let _ = float_map.insert(path, prim); }
+        for ((_, _, path), prim) in int_items.into_iter().zip(ints.into_iter()) { let _ = int_map.insert(path, prim); }
+        for ((_, _, path), prim) in bool_items.into_iter().zip(bools.into_iter()) { let _ = bool_map.insert(path, prim); }
+
+        // Mapper that installs prepared tensors
+        struct InstallApplier<'a, B: Backend> {
+            floats: &'a mut StdHashMap<String, burn_tensor::ops::FloatTensor<B>>,
+            ints: &'a mut StdHashMap<String, burn_tensor::ops::IntTensor<B>>,
+            bools: &'a mut StdHashMap<String, burn_tensor::ops::BoolTensor<B>>,
+            path: Vec<String>,
+        }
+        impl<'a, B: Backend> InstallApplier<'a, B> { fn new(
+            floats: &'a mut StdHashMap<String, burn_tensor::ops::FloatTensor<B>>,
+            ints: &'a mut StdHashMap<String, burn_tensor::ops::IntTensor<B>>,
+            bools: &'a mut StdHashMap<String, burn_tensor::ops::BoolTensor<B>>,
+        ) -> Self { Self { floats, ints, bools, path: Vec::new() } } fn cur(&self) -> String { self.path.join(".") } }
+        impl<'a, B: Backend> burn_core::module::ModuleMapper<B> for InstallApplier<'a, B> {
+            fn enter_module(&mut self, name: &str, _ty: &str) { self.path.push(name.to_string()); }
+            fn exit_module(&mut self, _n: &str, _ty: &str) { self.path.pop(); }
+            fn map_float<const D: usize>(&mut self, _id: burn_core::module::ParamId, _t: burn_tensor::Tensor<B,D>) -> burn_tensor::Tensor<B,D> {
+                let key = self.cur();
+                let prim = self.floats.remove(&key).expect("missing prepared float tensor");
+                burn_tensor::Tensor::from_primitive(burn_tensor::TensorPrimitive::Float(prim))
+            }
+            fn map_int<const D: usize>(&mut self, _id: burn_core::module::ParamId, _t: burn_tensor::Tensor<B,D,burn_tensor::Int>) -> burn_tensor::Tensor<B,D,burn_tensor::Int> {
+                let key = self.cur();
+                let prim = self.ints.remove(&key).expect("missing prepared int tensor");
+                burn_tensor::Tensor::from_primitive(prim)
+            }
+            fn map_bool<const D: usize>(&mut self, _id: burn_core::module::ParamId, _t: burn_tensor::Tensor<B,D,burn_tensor::Bool>) -> burn_tensor::Tensor<B,D,burn_tensor::Bool> {
+                let key = self.cur();
+                let prim = self.bools.remove(&key).expect("missing prepared bool tensor");
+                burn_tensor::Tensor::from_primitive(prim)
+            }
+        }
+
+        // Apply prepared tensors
+        let mut installer = InstallApplier::<B>::new(&mut float_map, &mut int_map, &mut bool_map);
+        *module = module.clone().map(&mut installer);
+
+        // Build ApplyResult
+        let unused: Vec<String> = snap_by_path.keys().cloned().collect();
+        let result = ApplyResult { applied, skipped: Vec::new(), missing, unused, errors };
+
+        if self.get_validate() && !result.errors.is_empty() {
+            return Err(SafetensorsError::ValidationFailed(format!("Import errors: {:?}", result.errors)));
+        }
+
+        if !self.get_allow_partial() && !result.missing.is_empty() {
+            return Err(SafetensorsError::TensorNotFound(format!("Missing tensors: {:?}", result.missing)));
         }
 
         Ok(result)
@@ -767,17 +1002,28 @@ fn safetensors_to_snapshots_lazy_file(
         let name_clone = name.to_string();
 
         let data_fn = alloc::rc::Rc::new(move || {
-            // Re-parse to get the tensor snapshot (this is cheap with mmap)
-            let tensors =
-                safetensors::SafeTensors::deserialize(&mmap_clone).expect("Failed to deserialize");
-            let tensor = tensors.tensor(&name_clone).expect("Tensor should exist");
-
-            // Only now do we actually copy the tensor data
-            TensorData {
-                bytes: burn_tensor::Bytes::from_bytes_vec(tensor.data().to_vec()),
-                shape: tensor.shape().to_vec(),
-                dtype: safetensor_dtype_to_burn(tensor.dtype()).expect("Valid dtype"),
-            }
+            // Re-parse to get the tensor snapshot (cheap with mmap)
+            let tensors = safetensors::SafeTensors::deserialize(&mmap_clone)
+                .expect("Failed to deserialize");
+            let t = tensors.tensor(&name_clone).expect("Tensor should exist");
+            let slice = t.data();
+            let ptr = slice.as_ptr() as *mut u8;
+            let len = slice.len();
+            // Conservative alignment (page-aligned on mmap, so 16 divides it)
+            let align = 16;
+            let allocation = Allocation {
+                ptr: core::ptr::NonNull::new(ptr).expect("null pointer"),
+                size: len,
+                align,
+            };
+            let bytes = unsafe {
+                Bytes::from_raw_parts(
+                    allocation,
+                    len,
+                    Box::new(MmapAllocationController { _mmap: mmap_clone.clone() }),
+                )
+            };
+            TensorData { bytes, shape: t.shape().to_vec(), dtype: safetensor_dtype_to_burn(t.dtype()).expect("Valid dtype") }
         });
 
         let snapshot = TensorSnapshot::from_closure(

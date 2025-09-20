@@ -27,6 +27,7 @@ pub use backend::*;
 
 // Re-export cubecl.
 pub use cubecl;
+mod batch_impl;
 
 mod tune_key;
 pub use tune_key::CubeAutotuneKey;
